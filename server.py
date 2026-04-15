@@ -16,40 +16,28 @@ BASE_URL = "https://cat-fact.herokuapp.com"
 async def get_facts(
     animal_type: Optional[str] = "cat",
     amount: Optional[int] = 1,
-    fact_id: Optional[str] = None
+    status: Optional[str] = "verified"
 ) -> dict:
-    """Retrieve cat facts from the Cat Facts API. Use this to fetch random facts, browse available facts, or get a specific fact by ID. This is the primary way to access the cat facts database."""
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        if fact_id:
-            url = f"{BASE_URL}/facts/{fact_id}"
-            response = await client.get(url)
-            if response.status_code == 200:
-                return {"success": True, "fact": response.json()}
-            else:
-                return {"success": False, "status_code": response.status_code, "error": response.text}
-        else:
-            url = f"{BASE_URL}/facts"
-            params = {}
-            if animal_type:
-                params["animal_type"] = animal_type
-            if amount:
-                params["amount"] = amount
-            response = await client.get(url, params=params)
-            if response.status_code == 200:
-                data = response.json()
-                return {"success": True, "facts": data}
-            else:
-                # Try the /facts/random endpoint as fallback
-                url_random = f"{BASE_URL}/facts/random"
-                params_random = {}
-                if animal_type:
-                    params_random["animal_type"] = animal_type
-                if amount:
-                    params_random["amount"] = amount
-                response2 = await client.get(url_random, params=params_random)
-                if response2.status_code == 200:
-                    return {"success": True, "facts": response2.json()}
-                return {"success": False, "status_code": response.status_code, "error": response.text}
+    """Retrieve cat facts from the Cat Facts API. Use this when the user wants to browse, search, or get a random cat fact. Supports filtering by animal type, status, and pagination."""
+    params = {}
+    if animal_type:
+        params["animal_type"] = animal_type
+    if amount is not None:
+        amount = max(1, min(500, amount))
+        params["amount"] = amount
+    if status:
+        params["status"] = status
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            response = await client.get(f"{BASE_URL}/facts", params=params)
+            response.raise_for_status()
+            data = response.json()
+            return {"success": True, "data": data}
+        except httpx.HTTPStatusError as e:
+            return {"success": False, "error": f"HTTP error {e.response.status_code}: {e.response.text}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
 
 @mcp.tool()
@@ -58,68 +46,72 @@ async def submit_fact(
     animal_type: Optional[str] = "cat",
     source: Optional[str] = None
 ) -> dict:
-    """Submit a new cat fact to the database for review and inclusion. Use this when a user wants to contribute their own interesting animal fact to the Cat Facts collection."""
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        url = f"{BASE_URL}/facts"
-        payload = {
-            "text": text,
-            "type": animal_type or "cat"
-        }
-        if source:
-            payload["source"] = source
-        response = await client.post(url, json=payload)
-        if response.status_code in (200, 201):
-            return {"success": True, "message": "Fact submitted successfully for review.", "data": response.json()}
-        else:
-            return {"success": False, "status_code": response.status_code, "error": response.text}
+    """Submit a new cat (or other animal) fact to the Cat Facts database for review. Use this when the user wants to contribute a fact they know. Facts are stored as unverified until reviewed by an admin."""
+    payload = {
+        "text": text,
+        "type": animal_type or "cat",
+        "status": {"verified": False}
+    }
+    if source:
+        payload["source"] = source
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            response = await client.post(f"{BASE_URL}/facts", json=payload)
+            response.raise_for_status()
+            data = response.json()
+            return {"success": True, "data": data, "message": "Fact submitted successfully and is pending review."}
+        except httpx.HTTPStatusError as e:
+            return {"success": False, "error": f"HTTP error {e.response.status_code}: {e.response.text}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
 
 @mcp.tool()
 async def manage_recipients(
     action: str,
-    phone_number: Optional[str] = None,
     name: Optional[str] = None,
+    phone_number: Optional[str] = None,
     recipient_id: Optional[str] = None
 ) -> dict:
-    """Add, view, update, or remove recipients who will receive daily cat fact text messages. Use this to manage the list of phone numbers subscribed to receive cat facts. Actions: 'list', 'add', 'remove'."""
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        if action == "list":
-            url = f"{BASE_URL}/users/me/recipients"
-            response = await client.get(url)
-            if response.status_code == 200:
-                return {"success": True, "recipients": response.json()}
-            else:
-                return {"success": False, "status_code": response.status_code, "error": response.text}
+    """Add, list, or remove recipients who will receive daily cat facts via SMS. Use this to manage the user's personal list of fact recipients (friends to prank with cat facts)."""
+    action = action.lower().strip()
 
-        elif action == "add":
-            if not phone_number:
-                return {"success": False, "error": "phone_number is required to add a recipient."}
-            url = f"{BASE_URL}/users/me/recipients"
-            # Clean phone number: remove non-digits and leading 1
-            cleaned = "".join(c for c in phone_number if c.isdigit())
-            if cleaned.startswith("1") and len(cleaned) == 11:
-                cleaned = cleaned[1:]
-            payload = {"phoneNumber": cleaned}
-            if name:
-                payload["name"] = name
-            response = await client.post(url, json=payload)
-            if response.status_code in (200, 201):
-                return {"success": True, "message": "Recipient added successfully.", "data": response.json()}
-            else:
-                return {"success": False, "status_code": response.status_code, "error": response.text}
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            if action == "list":
+                response = await client.get(f"{BASE_URL}/users/me/recipients")
+                response.raise_for_status()
+                data = response.json()
+                return {"success": True, "data": data}
 
-        elif action == "remove":
-            if not recipient_id:
-                return {"success": False, "error": "recipient_id is required to remove a recipient."}
-            url = f"{BASE_URL}/users/me/recipients/{recipient_id}"
-            response = await client.delete(url)
-            if response.status_code in (200, 204):
+            elif action == "add":
+                if not name or not phone_number:
+                    return {"success": False, "error": "Both 'name' and 'phone_number' are required when action is 'add'."}
+                # Clean phone number
+                cleaned = "".join(c for c in phone_number if c.isdigit())
+                if len(cleaned) not in (10, 11):
+                    return {"success": False, "error": "Phone number must be 10 or 11 digits."}
+                payload = {"name": name, "phoneNumber": cleaned}
+                response = await client.post(f"{BASE_URL}/users/me/recipients", json=payload)
+                response.raise_for_status()
+                data = response.json()
+                return {"success": True, "data": data, "message": f"Recipient '{name}' added successfully."}
+
+            elif action == "remove":
+                if not recipient_id:
+                    return {"success": False, "error": "'recipient_id' is required when action is 'remove'."}
+                response = await client.delete(f"{BASE_URL}/users/me/recipients/{recipient_id}")
+                response.raise_for_status()
                 return {"success": True, "message": f"Recipient {recipient_id} removed successfully."}
-            else:
-                return {"success": False, "status_code": response.status_code, "error": response.text}
 
-        else:
-            return {"success": False, "error": f"Unknown action '{action}'. Supported actions are: 'list', 'add', 'remove'."}
+            else:
+                return {"success": False, "error": f"Unknown action '{action}'. Valid actions: 'list', 'add', 'remove'."}
+
+        except httpx.HTTPStatusError as e:
+            return {"success": False, "error": f"HTTP error {e.response.status_code}: {e.response.text}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
 
 @mcp.tool()
@@ -127,160 +119,151 @@ async def send_fact(
     recipient_id: Optional[str] = None,
     fact_id: Optional[str] = None
 ) -> dict:
-    """Manually trigger sending a cat fact via text message to one or all recipients. Use this when a user wants to immediately send a fact rather than waiting for the scheduled daily send."""
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        url = f"{BASE_URL}/users/me/recipients/send"
-        payload = {}
-        if recipient_id:
-            payload["recipientId"] = recipient_id
-        if fact_id:
-            payload["factId"] = fact_id
-        response = await client.post(url, json=payload)
-        if response.status_code in (200, 201):
-            return {"success": True, "message": "Cat fact sent successfully.", "data": response.json()}
-        else:
-            return {"success": False, "status_code": response.status_code, "error": response.text}
+    """Manually trigger sending a cat fact via SMS to one or all recipients. Use this when the user wants to send a fact immediately rather than waiting for the daily scheduled send."""
+    payload = {}
+    if recipient_id:
+        payload["recipientId"] = recipient_id
+    if fact_id:
+        payload["factId"] = fact_id
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            response = await client.post(f"{BASE_URL}/users/me/sendFact", json=payload)
+            response.raise_for_status()
+            data = response.json()
+            return {"success": True, "data": data, "message": "Cat fact sent successfully."}
+        except httpx.HTTPStatusError as e:
+            return {"success": False, "error": f"HTTP error {e.response.status_code}: {e.response.text}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
 
 @mcp.tool()
-async def get_messages(
-    recipient_id: Optional[str] = None,
-    limit: Optional[int] = 20,
-    page: Optional[int] = 1
+async def get_conversation(
+    recipient_id: str,
+    limit: Optional[int] = 20
 ) -> dict:
-    """Retrieve the conversation history (catversation) between the Catbot and a recipient. Use this to view messages exchanged, including auto-replies from the Catbot when recipients text back."""
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        if recipient_id:
-            url = f"{BASE_URL}/users/me/recipients/{recipient_id}/messages"
-        else:
-            url = f"{BASE_URL}/users/me/messages"
-        params = {}
-        if limit:
-            params["limit"] = limit
-        if page:
-            params["page"] = page
-        response = await client.get(url, params=params)
-        if response.status_code == 200:
-            return {"success": True, "messages": response.json()}
-        else:
-            return {"success": False, "status_code": response.status_code, "error": response.text}
+    """Retrieve the SMS conversation history (catversation) between the Catbot and a specific recipient. Use this to view how a recipient has been responding to cat facts and what the Catbot replied."""
+    params = {}
+    if limit is not None:
+        params["limit"] = max(1, limit)
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            response = await client.get(
+                f"{BASE_URL}/users/me/recipients/{recipient_id}/conversation",
+                params=params
+            )
+            response.raise_for_status()
+            data = response.json()
+            return {"success": True, "data": data}
+        except httpx.HTTPStatusError as e:
+            return {"success": False, "error": f"HTTP error {e.response.status_code}: {e.response.text}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
 
 @mcp.tool()
-async def authenticate_user(
-    action: str,
-    token: Optional[str] = None
-) -> dict:
-    """Handle user authentication including login via Google OAuth, session management, and logout. Use this to authenticate the user before performing protected operations like managing recipients or accessing the admin console. Actions: 'login', 'logout', 'status'."""
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        if action == "login":
-            login_url = f"{BASE_URL}/auth/google"
-            return {
-                "success": True,
-                "message": "To log in with Google OAuth, please visit the following URL in your browser.",
-                "login_url": login_url,
-                "instructions": "Navigate to the login_url to initiate the Google OAuth flow. After authenticating, you will receive a session token."
-            }
+async def authenticate_user(action: str) -> dict:
+    """Authenticate or manage user session for the Cat Facts app. Use this to log in via Google OAuth, check current session status, or log out. Required before accessing protected features like managing recipients."""
+    action = action.lower().strip()
 
-        elif action == "logout":
-            url = f"{BASE_URL}/auth/logout"
-            headers = {}
-            if token:
-                headers["Authorization"] = f"Bearer {token}"
-            response = await client.get(url, headers=headers)
-            if response.status_code in (200, 302):
-                return {"success": True, "message": "Logged out successfully."}
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            if action == "login":
+                login_url = f"{BASE_URL}/auth/google"
+                return {
+                    "success": True,
+                    "message": "To log in with Google OAuth, please visit the following URL in your browser:",
+                    "login_url": login_url,
+                    "instructions": "After logging in, your session will be established with the Cat Facts server."
+                }
+
+            elif action == "logout":
+                response = await client.get(f"{BASE_URL}/auth/logout")
+                return {
+                    "success": True,
+                    "message": "Logout request sent.",
+                    "status_code": response.status_code
+                }
+
+            elif action == "status":
+                response = await client.get(f"{BASE_URL}/users/me")
+                if response.status_code == 200:
+                    data = response.json()
+                    return {"success": True, "authenticated": True, "user": data}
+                elif response.status_code in (401, 403):
+                    return {"success": True, "authenticated": False, "message": "Not currently authenticated."}
+                else:
+                    return {"success": True, "authenticated": False, "status_code": response.status_code}
+
             else:
-                return {"success": False, "status_code": response.status_code, "error": response.text}
+                return {"success": False, "error": f"Unknown action '{action}'. Valid actions: 'login', 'logout', 'status'."}
 
-        elif action == "status":
-            url = f"{BASE_URL}/users/me"
-            headers = {}
-            if token:
-                headers["Authorization"] = f"Bearer {token}"
-            response = await client.get(url, headers=headers)
-            if response.status_code == 200:
-                return {"success": True, "authenticated": True, "user": response.json()}
-            elif response.status_code == 401:
-                return {"success": True, "authenticated": False, "message": "Not authenticated."}
-            else:
-                return {"success": False, "status_code": response.status_code, "error": response.text}
-
-        else:
-            return {"success": False, "error": f"Unknown action '{action}'. Supported actions are: 'login', 'logout', 'status'."}
+        except httpx.HTTPStatusError as e:
+            return {"success": False, "error": f"HTTP error {e.response.status_code}: {e.response.text}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
 
 @mcp.tool()
 async def import_google_contacts(
-    filter: Optional[str] = None,
-    dry_run: Optional[bool] = False
+    max_contacts: Optional[int] = None,
+    confirm: Optional[bool] = False
 ) -> dict:
-    """Import phone numbers from the authenticated user's Google Contacts to bulk-add recipients. Use this when a user wants to add multiple recipients at once from their existing Google address book."""
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        url = f"{BASE_URL}/users/me/recipients/import"
-        params = {}
-        if filter:
-            params["filter"] = filter
-        if dry_run:
-            params["dryRun"] = "true"
-        response = await client.get(url, params=params)
-        if response.status_code == 200:
+    """Import contacts from the user's Google account as cat fact recipients in bulk. Use this when the user wants to add many recipients at once from their Google Contacts instead of adding them one by one."""
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        try:
+            if not confirm:
+                return {
+                    "success": True,
+                    "message": "This action will import your Google contacts as cat fact recipients. Set 'confirm' to true to proceed.",
+                    "warning": "All contacts with valid phone numbers will be imported (or up to max_contacts if specified).",
+                    "max_contacts": max_contacts,
+                    "requires_authentication": True,
+                    "note": "You must be authenticated via Google OAuth before importing contacts. Use authenticate_user with action='login' first."
+                }
+
+            params = {}
+            if max_contacts is not None:
+                params["max"] = max_contacts
+
+            response = await client.get(f"{BASE_URL}/users/me/contacts/import", params=params)
+            response.raise_for_status()
             data = response.json()
-            result = {"success": True, "data": data}
-            if dry_run:
-                result["message"] = "Dry run completed. No contacts were actually imported."
-            else:
-                result["message"] = "Google contacts import initiated."
-            return result
-        elif response.status_code == 401:
-            return {
-                "success": False,
-                "error": "Authentication required. Please use authenticate_user with action='login' first.",
-                "status_code": 401
-            }
-        else:
-            return {"success": False, "status_code": response.status_code, "error": response.text}
+            return {"success": True, "data": data, "message": "Google contacts imported successfully."}
+
+        except httpx.HTTPStatusError as e:
+            return {"success": False, "error": f"HTTP error {e.response.status_code}: {e.response.text}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
 
 @mcp.tool()
 async def get_api_logs(
     limit: Optional[int] = 50,
-    page: Optional[int] = 1,
-    endpoint: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None
 ) -> dict:
-    """Retrieve API usage logs for monitoring and debugging. Use this in an admin context to view request history, track usage patterns, or investigate errors in the Cat Facts API."""
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        url = f"{BASE_URL}/admin/logs"
-        params = {}
-        if limit:
-            params["limit"] = limit
-        if page:
-            params["page"] = page
-        if endpoint:
-            params["endpoint"] = endpoint
-        if start_date:
-            params["startDate"] = start_date
-        if end_date:
-            params["endDate"] = end_date
-        response = await client.get(url, params=params)
-        if response.status_code == 200:
-            return {"success": True, "logs": response.json()}
-        elif response.status_code == 401:
-            return {
-                "success": False,
-                "error": "Admin authentication required to access API logs.",
-                "status_code": 401
-            }
-        elif response.status_code == 403:
-            return {
-                "success": False,
-                "error": "Forbidden. Admin privileges required to access API logs.",
-                "status_code": 403
-            }
-        else:
-            return {"success": False, "status_code": response.status_code, "error": response.text}
+    """Retrieve API usage logs for the Cat Facts developer API. Use this for admin/developer purposes to monitor API activity, track usage patterns, or debug issues with API requests."""
+    params = {}
+    if limit is not None:
+        params["limit"] = max(1, limit)
+    if start_date:
+        params["start"] = start_date
+    if end_date:
+        params["end"] = end_date
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            response = await client.get(f"{BASE_URL}/logs", params=params)
+            response.raise_for_status()
+            data = response.json()
+            return {"success": True, "data": data}
+        except httpx.HTTPStatusError as e:
+            return {"success": False, "error": f"HTTP error {e.response.status_code}: {e.response.text}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
 
 
